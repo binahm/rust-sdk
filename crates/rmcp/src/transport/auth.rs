@@ -7,16 +7,16 @@ use std::{
 use async_trait::async_trait;
 use oauth2::{
     AsyncHttpClient, AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
-    EmptyExtraTokenFields, HttpClientError, HttpRequest, HttpResponse, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, RefreshToken, RequestTokenError, Scope, StandardTokenResponse,
-    TokenResponse, TokenUrl,
-    basic::{BasicClient, BasicTokenType},
+    EmptyExtraTokenFields, ExtraTokenFields, HttpClientError, HttpRequest, HttpResponse,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, RequestTokenError, Scope,
+    StandardTokenResponse, TokenResponse, TokenUrl, basic::BasicTokenType,
 };
 use reqwest::{
     Client as HttpClient, IntoUrl, StatusCode, Url,
     header::{AUTHORIZATION, WWW_AUTHENTICATE},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, warn};
@@ -125,6 +125,12 @@ pub struct StoredAuthorizationState {
     pub csrf_token: String,
     pub created_at: u64,
 }
+
+/// Extra fields to capture vendor specific fields
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VendorExtraTokenFields(pub HashMap<String, Value>);
+
+impl ExtraTokenFields for VendorExtraTokenFields {}
 
 impl StoredAuthorizationState {
     pub fn new(pkce_verifier: &PkceCodeVerifier, csrf_token: &CsrfToken) -> Self {
@@ -345,7 +351,7 @@ pub struct OAuthClientConfig {
 
 // add type aliases for oauth2 types
 type OAuthErrorResponse = oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>;
-pub type OAuthTokenResponse = StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>;
+pub type OAuthTokenResponse = StandardTokenResponse<VendorExtraTokenFields, BasicTokenType>;
 type OAuthTokenIntrospection =
     oauth2::StandardTokenIntrospectionResponse<EmptyExtraTokenFields, BasicTokenType>;
 type OAuthRevocableToken = oauth2::StandardRevocableToken;
@@ -581,7 +587,7 @@ impl AuthorizationManager {
         let redirect_url = RedirectUrl::new(config.redirect_uri.clone())
             .map_err(|e| AuthError::OAuthError(format!("Invalid re URL: {}", e)))?;
 
-        let mut client_builder = BasicClient::new(client_id.clone())
+        let mut client_builder: OAuthClient = oauth2::Client::new(client_id.clone())
             .set_auth_uri(auth_url)
             .set_token_uri(token_url)
             .set_redirect_uri(redirect_url);
@@ -882,7 +888,7 @@ impl AuthorizationManager {
         &self,
         code: &str,
         csrf_token: &str,
-    ) -> Result<StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>, AuthError> {
+    ) -> Result<OAuthTokenResponse, AuthError> {
         debug!("start exchange code for token: {:?}", code);
         let oauth_client = self
             .oauth_client
@@ -1014,9 +1020,7 @@ impl AuthorizationManager {
     }
 
     /// refresh access token
-    pub async fn refresh_token(
-        &self,
-    ) -> Result<StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>, AuthError> {
+    pub async fn refresh_token(&self) -> Result<OAuthTokenResponse, AuthError> {
         let oauth_client = self
             .oauth_client
             .as_ref()
@@ -1548,7 +1552,7 @@ impl AuthorizationSession {
         &self,
         code: &str,
         csrf_token: &str,
-    ) -> Result<StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>, AuthError> {
+    ) -> Result<OAuthTokenResponse, AuthError> {
         self.auth_manager
             .exchange_code_for_token(code, csrf_token)
             .await
