@@ -260,3 +260,13 @@ path = "tests/test_sse_concurrent_streams.rs"
 name = "test_client_credentials"
 required-features = ["auth"]
 path = "tests/test_client_credentials.rs"
+
+[[test]]
+name = "test_streamable_http_session_store"
+required-features = [
+  "client",
+  "server",
+  "transport-streamable-http-client-reqwest",
+  "transport-streamable-http-server",
+]
+path = "tests/test_streamable_http_session_store.rs"
