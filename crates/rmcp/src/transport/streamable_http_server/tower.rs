@@ -465,22 +465,26 @@ where
         // `serve_server` requires both the `initialize` request and the
         // `notifications/initialized` notification before transitioning to
         // the running state — we must send both before returning.
-        let mut fake_init = ClientJsonRpcMessage::request(
+        let mut restore_init = ClientJsonRpcMessage::request(
             ClientRequest::InitializeRequest(InitializeRequest {
                 params: state.initialize_params,
                 ..Default::default()
             }),
             crate::model::NumberOrString::Number(0),
         );
-        fake_init.insert_extension(parts.clone());
-        fake_init.insert_extension(SessionRestoreMarker);
-        let mut fake_initialized = ClientJsonRpcMessage::notification(
+        restore_init.insert_extension(parts.clone());
+        restore_init.insert_extension(SessionRestoreMarker {
+            id: session_id.clone(),
+        });
+        let mut restore_initialized = ClientJsonRpcMessage::notification(
             ClientNotification::InitializedNotification(InitializedNotification {
                 ..Default::default()
             }),
         );
-        fake_initialized.insert_extension(parts.clone());
-
+        restore_initialized.insert_extension(parts.clone());
+        restore_initialized.insert_extension(SessionRestoreMarker {
+            id: session_id.clone(),
+        });
         // Signal from the spawned task once serve_server finishes initialising.
         let (init_done_tx, init_done_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -494,7 +498,7 @@ where
 
         if let Err(e) = self
             .session_manager
-            .initialize_session(session_id, fake_init)
+            .initialize_session(session_id, restore_init)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))
         {
@@ -504,7 +508,7 @@ where
 
         if let Err(e) = self
             .session_manager
-            .accept_message(session_id, fake_initialized)
+            .accept_message(session_id, restore_initialized)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))
         {

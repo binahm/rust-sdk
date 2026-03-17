@@ -43,8 +43,10 @@ pub use store::{SessionState, SessionStore, SessionStoreError};
 ///     // this is a restore replay, not a fresh client connection
 /// }
 /// ```
-#[derive(Debug, Clone, Copy)]
-pub struct SessionRestoreMarker;
+#[derive(Debug, Clone)]
+pub struct SessionRestoreMarker {
+    pub id: SessionId,
+}
 
 /// The outcome of a [`SessionManager::restore_session`] call.
 #[derive(Debug)]
