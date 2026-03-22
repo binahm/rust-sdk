@@ -388,6 +388,7 @@
         "content": {
           "description": "The content returned by the tool (text, images, etc.)",
           "type": "array",
+          "default": [],
           "items": {
             "$ref": "#/definitions/Annotated"
           }
@@ -402,10 +403,7 @@
         "structuredContent": {
           "description": "An optional JSON object that represents the structured result of the tool call"
         }
-      },
-      "required": [
-        "content"
-      ]
+      }
     },
     "CancelTaskResult": {
       "description": "Response to a `tasks/cancel` request.\n\nPer spec, `CancelTaskResult = allOf[Result, Task]` — same shape as `GetTaskResult`.",
@@ -1092,10 +1090,29 @@
         "src": {
           "description": "A standard URI pointing to an icon resource",
           "type": "string"
+        },
+        "theme": {
+          "description": "Optional specifier for the theme this icon is designed for",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IconTheme"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "src"
+      ]
+    },
+    "IconTheme": {
+      "description": "Icon themes supported by the MCP specification",
+      "type": "string",
+      "enum": [
+        "light",
+        "dark"
       ]
     },
     "Implementation": {
@@ -2814,16 +2831,10 @@
           "$ref": "#/definitions/ReadResourceResult"
         },
         {
-          "$ref": "#/definitions/CallToolResult"
-        },
-        {
           "$ref": "#/definitions/ListToolsResult"
         },
         {
           "$ref": "#/definitions/CreateElicitationResult"
-        },
-        {
-          "$ref": "#/definitions/EmptyObject"
         },
         {
           "$ref": "#/definitions/CreateTaskResult"
@@ -2838,10 +2849,16 @@
           "$ref": "#/definitions/CancelTaskResult"
         },
         {
-          "$ref": "#/definitions/CustomResult"
+          "$ref": "#/definitions/CallToolResult"
         },
         {
           "$ref": "#/definitions/GetTaskPayloadResult"
+        },
+        {
+          "$ref": "#/definitions/EmptyObject"
+        },
+        {
+          "$ref": "#/definitions/CustomResult"
         }
       ]
     },
