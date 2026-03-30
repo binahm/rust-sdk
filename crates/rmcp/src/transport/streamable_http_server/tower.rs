@@ -35,6 +35,7 @@ use crate::{
 };
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct StreamableHttpServerConfig {
     /// The ping message duration for SSE connections.
     pub sse_keep_alive: Option<Duration>,
@@ -103,6 +104,33 @@ impl Default for StreamableHttpServerConfig {
             cancellation_token: CancellationToken::new(),
             session_store: None,
         }
+    }
+}
+
+impl StreamableHttpServerConfig {
+    pub fn with_sse_keep_alive(mut self, duration: Option<Duration>) -> Self {
+        self.sse_keep_alive = duration;
+        self
+    }
+
+    pub fn with_sse_retry(mut self, duration: Option<Duration>) -> Self {
+        self.sse_retry = duration;
+        self
+    }
+
+    pub fn with_stateful_mode(mut self, stateful: bool) -> Self {
+        self.stateful_mode = stateful;
+        self
+    }
+
+    pub fn with_json_response(mut self, json_response: bool) -> Self {
+        self.json_response = json_response;
+        self
+    }
+
+    pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = token;
+        self
     }
 }
 
