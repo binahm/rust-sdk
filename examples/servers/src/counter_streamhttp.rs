@@ -1,6 +1,7 @@
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
+use tower_http::cors::CorsLayer;
 use tracing_subscriber::{
     layer::SubscriberExt,
     util::SubscriberInitExt,
@@ -28,8 +29,11 @@ async fn main() -> anyhow::Result<()> {
         StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
     );
 
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let router = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(CorsLayer::permissive());
     let tcp_listener = tokio::net::TcpListener::bind(BIND_ADDRESS).await?;
+    tracing::info!("MCP service available at: http://{}/mcp", BIND_ADDRESS);
     let _ = axum::serve(tcp_listener, router)
         .with_graceful_shutdown(async move {
             tokio::signal::ctrl_c().await.unwrap();

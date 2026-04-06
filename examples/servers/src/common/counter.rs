@@ -38,6 +38,23 @@ pub struct StructRequest {
     pub b: i32,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LongRunningArgs {
+    #[schemars(description = "Duration of the long running task in seconds")]
+    #[schemars(default = "default_duration")]
+    pub duration: i32,
+    #[schemars(description = "Number notifications to send before completion")]
+    #[schemars(default = "default_count")]
+    pub count: i32,
+}
+
+fn default_duration() -> i32 {
+    10
+}
+fn default_count() -> i32 {
+    5
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExamplePromptArgs {
     /// A message to put in the prompt
@@ -106,6 +123,47 @@ impl Counter {
     #[tool(description = "Long running task example")]
     async fn long_task(&self) -> Result<CallToolResult, McpError> {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        Ok(CallToolResult::success(vec![Content::text(
+            "Long task completed",
+        )]))
+    }
+
+    #[tool(description = "Long running task example with progress updates.")]
+    async fn long_running_with_notification(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        Parameters(args): Parameters<LongRunningArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        for i in 1..=args.count {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                (args.duration * 1000) as u64 / args.count as u64,
+            ))
+            .await;
+            let counter = i as i64;
+            if let Some(token) = ctx.meta.get_progress_token() {
+                tracing::debug!("Notifying progress for token {token:?} with progress {counter}");
+                let progress_param = ProgressNotificationParam {
+                    progress_token: token.clone(),
+                    progress: counter as f64,
+                    total: Some(args.count as f64),
+                    message: Some(format!("Progress: {}", counter)),
+                };
+                match ctx.peer.notify_progress(progress_param).await {
+                    Ok(_) => {
+                        tracing::debug!("Processed progress notification: {}", counter);
+                    }
+                    Err(e) => {
+                        return Err(McpError::internal_error(
+                            format!("Failed to notify progress: {}", e),
+                            Some(json!({
+                                "progress": counter,
+                                "error": e.to_string()
+                            })),
+                        ));
+                    }
+                }
+            }
+        }
         Ok(CallToolResult::success(vec![Content::text(
             "Long task completed",
         )]))
@@ -360,7 +418,7 @@ mod tests {
             "source".into(),
             serde_json::Value::String("integration-test".into()),
         );
-        let params = CallToolRequestParams::new("long_task").with_task(Some(task_meta));
+        let params = CallToolRequestParams::new("long_task").with_task(task_meta);
         let response = client_service
             .send_request(ClientRequest::CallToolRequest(Request::new(params.clone())))
             .await?;

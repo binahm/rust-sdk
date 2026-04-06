@@ -7,6 +7,8 @@ use rmcp::{
         streamable_http_server::{StreamableHttpService, session::local::LocalSessionManager},
     },
 };
+use tower_http::cors::CorsLayer;
+use tracing_subscriber::EnvFilter;
 
 mod common;
 use common::progress_demo::ProgressDemo;
@@ -15,6 +17,12 @@ const HTTP_BIND_ADDRESS: &str = "127.0.0.1:8001";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+
     // Get transport mode from environment variable or command line argument
     let transport_mode = env::args()
         .nth(1)
@@ -49,7 +57,9 @@ async fn run_streamable_http() -> anyhow::Result<()> {
         Default::default(),
     );
 
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let router = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(CorsLayer::permissive());
     let tcp_listener = tokio::net::TcpListener::bind(HTTP_BIND_ADDRESS).await?;
 
     tracing::info!(
@@ -74,7 +84,9 @@ async fn run_all_transports() -> anyhow::Result<()> {
         LocalSessionManager::default().into(),
         Default::default(),
     );
-    let http_router = axum::Router::new().nest_service("/mcp", http_service);
+    let http_router = axum::Router::new()
+        .nest_service("/mcp", http_service)
+        .layer(CorsLayer::permissive());
     let http_listener = tokio::net::TcpListener::bind(HTTP_BIND_ADDRESS).await?;
 
     // Start Streamable HTTP server
