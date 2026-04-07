@@ -276,7 +276,7 @@ impl ServerHandler for Counter {
                 .build(),
         )
         .with_server_info(Implementation::from_build_env())
-        .with_protocol_version(ProtocolVersion::V_2024_11_05)
+        .with_protocol_version(ProtocolVersion::V_2025_06_18)
         .with_instructions("This server provides counter tools and prompts. Tools: increment, decrement, get_value, say_hello, echo, sum. Prompts: example_prompt (takes a message), counter_analysis (analyzes counter state with a goal).".to_string())
     }
 
