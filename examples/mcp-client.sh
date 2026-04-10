@@ -2,6 +2,10 @@
 set -euo pipefail
 
 URL="${1:-http://localhost:8000/mcp}"
+TOOL_NAME="${2:-say_hello}"
+
+echo "Connecting to MCP server at $URL"
+echo "Using tool: $TOOL_NAME"
 
 # POST initialize and capture session ID from response header
 SESSION_ID=$(curl -s -D - -o /dev/null \
@@ -50,11 +54,11 @@ echo "MCP_SESSION_ID=$MCP_SESSION_ID"
 for i in {1..2}; do
   echo "Calling tool ... (iteration $i)"
   
-  curl 'http://127.0.0.1:8000/mcp' \
+  curl -v "$URL" \
     -H 'accept: application/json, text/event-stream' \
     -H 'content-type: application/json' \
     -H "Mcp-Protocol-Version: 2025-06-18" \
     -H "mcp-session-id: $MCP_SESSION_ID" \
-    --data-raw '{"method":"tools/call","params":{"name":"say_hello","arguments":{},"_meta":{"progressToken":1}},"jsonrpc":"2.0","id":'"$i"'}'
+    --data-raw '{"method":"tools/call","params":{"name":"'"$TOOL_NAME"'","arguments":{},"_meta":{"progressToken":1}},"jsonrpc":"2.0","id":'"$i"'}'
 
 done
