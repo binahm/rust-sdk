@@ -1545,23 +1545,18 @@ pub enum Role {
 }
 
 /// Tool selection mode (SEP-1577).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[expect(clippy::exhaustive_enums, reason = "intentionally exhaustive")]
 pub enum ToolChoiceMode {
     /// Model decides whether to use tools
+    #[default]
     Auto,
     /// Model must use at least one tool
     Required,
     /// Model must not use tools
     None,
-}
-
-impl Default for ToolChoiceMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Tool choice configuration (SEP-1577).
@@ -2699,6 +2694,10 @@ pub struct CreateElicitationResult {
     /// Only present when action is Accept.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<Value>,
+
+    /// Optional protocol-level metadata for this result.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Meta>,
 }
 
 impl CreateElicitationResult {
@@ -2707,12 +2706,19 @@ impl CreateElicitationResult {
         Self {
             action,
             content: None,
+            meta: None,
         }
     }
 
     /// Set the content on this result.
     pub fn with_content(mut self, content: Value) -> Self {
         self.content = Some(content);
+        self
+    }
+
+    /// Set the metadata on this result.
+    pub fn with_meta(mut self, meta: Meta) -> Self {
+        self.meta = Some(meta);
         self
     }
 }
