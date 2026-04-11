@@ -396,3 +396,208 @@ async fn test_priming_on_stream_close() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod test_priming_resume {
+
+    use rmcp::{
+        ServerHandler,
+        handler::server::router::tool::ToolRouter,
+        model::{CallToolResult, Content, ErrorData as McpError, ServerCapabilities, ServerInfo},
+        service::{RoleClient, RunningService, serve_client},
+        tool, tool_handler, tool_router,
+        transport::{
+            StreamableHttpClientTransport,
+            streamable_http_client::StreamableHttpClientTransportConfig,
+            streamable_http_server::{
+                StreamableHttpServerConfig, StreamableHttpService,
+                session::local::LocalSessionManager,
+            },
+        },
+    };
+    use tokio_util::sync::CancellationToken;
+
+    // Guard against infinite loops in any call_tool invocation.
+    const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    // we use a short reqwest timeout to trigger the priming / event replay.
+    // REQWEST_TIMEOUT should be shorter than the tool runtime LONG_TASK_DURATION
+    const REQWEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    const LONG_TASK_DURATION: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn init_logging() {
+        // Safe to call from multiple tests in the same process.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "error".to_string().into()),
+            )
+            .with_file(true)
+            .with_line_number(true)
+            .try_init();
+    }
+
+    /// Spin up a `LongRunning` MCP server on a random port.
+    /// Returns the bound address, a cancellation token to stop the server, and its task handle.
+    async fn setup_server() -> anyhow::Result<(
+        std::net::SocketAddr,
+        CancellationToken,
+        tokio::task::JoinHandle<()>,
+    )> {
+        let ct = CancellationToken::new();
+        let service: StreamableHttpService<LongRunning, LocalSessionManager> =
+            StreamableHttpService::new(
+                || Ok(LongRunning::new()),
+                Default::default(),
+                StreamableHttpServerConfig::default()
+                    .with_sse_keep_alive(None)
+                    .with_cancellation_token(ct.child_token()),
+            );
+        let router = axum::Router::new().nest_service("/mcp", service);
+        let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = tcp_listener.local_addr()?;
+        let server_handle = tokio::spawn({
+            let ct = ct.clone();
+            async move {
+                let _ = axum::serve(tcp_listener, router)
+                    .with_graceful_shutdown(ct.cancelled_owned())
+                    .await;
+            }
+        });
+        Ok((addr, ct, server_handle))
+    }
+
+    /// Connect an MCP client to `addr`.
+    /// Uses a short request timeout (3 s, below the tool's 5 s runtime) to trigger
+    /// the priming / event-replay code path.
+    async fn setup_client(
+        addr: std::net::SocketAddr,
+    ) -> anyhow::Result<RunningService<RoleClient, ()>> {
+        let reqwest_client = reqwest::Client::builder()
+            .timeout(REQWEST_TIMEOUT)
+            .connection_verbose(true)
+            .build()?;
+        let transport = StreamableHttpClientTransport::with_client(
+            reqwest_client,
+            StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
+        );
+        Ok(serve_client((), transport).await?)
+    }
+
+    fn assert_tool_success(label: &str, result: &CallToolResult) {
+        assert!(
+            result.is_error != Some(true),
+            "{label} call_tool expected success, got: {result:?}"
+        );
+        assert_eq!(
+            result.content.len(),
+            1,
+            "{label} call_tool expected 1 content item"
+        );
+        assert_eq!(
+            result.content[0].as_text().unwrap().text,
+            "Long task completed"
+        );
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct LongRunning {
+        tool_router: ToolRouter<Self>,
+    }
+
+    impl LongRunning {
+        pub fn new() -> Self {
+            Self {
+                tool_router: Self::tool_router(),
+            }
+        }
+    }
+
+    #[tool_router]
+    impl LongRunning {
+        #[tool(description = "Run a long running tool call")]
+        async fn long_task(&self) -> Result<CallToolResult, McpError> {
+            tokio::time::sleep(LONG_TASK_DURATION).await;
+            Ok(CallToolResult::success(vec![Content::text(
+                "Long task completed",
+            )]))
+        }
+    }
+
+    #[tool_handler(router = self.tool_router)]
+    impl ServerHandler for LongRunning {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_long_running_tool_single_via_mcp_client() -> anyhow::Result<()> {
+        init_logging();
+        let (addr, ct, server_handle) = setup_server().await?;
+        let client = setup_client(addr).await?;
+
+        let result = tokio::time::timeout(
+            CALL_TIMEOUT,
+            client.call_tool(rmcp::model::CallToolRequestParams::new("long_task")),
+        )
+        .await;
+
+        // Always clean up before asserting.
+        let _ = client.cancel().await;
+        ct.cancel();
+        server_handle.await?;
+
+        let result = result.expect("call_tool timed out - client may be stuck in endless loop")?;
+        assert_tool_success("single", &result);
+        assert_eq!(
+            result.content[0].as_text().unwrap().text,
+            "Long task completed"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_long_running_tool_parallel_via_mcp_client() -> anyhow::Result<()> {
+        init_logging();
+        let (addr, ct, server_handle) = setup_server().await?;
+        let client = setup_client(addr).await?;
+
+        // Spawn a second call delayed by 4 seconds so it overlaps with the first
+        // mid-flight, exercising the priming / event-replay path.
+        let parallel_handle = tokio::spawn({
+            let client = client.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                client
+                    .call_tool(rmcp::model::CallToolRequestParams::new("long_task"))
+                    .await
+            }
+        });
+
+        // Run both timeouts concurrently so the total wall time is bounded at 15 s.
+        let (main_result, parallel_result) = tokio::join!(
+            tokio::time::timeout(
+                CALL_TIMEOUT,
+                client.call_tool(rmcp::model::CallToolRequestParams::new("long_task")),
+            ),
+            tokio::time::timeout(CALL_TIMEOUT, parallel_handle),
+        );
+
+        // Always clean up before asserting.
+        let _ = client.cancel().await;
+        ct.cancel();
+        server_handle.await?;
+
+        let result =
+            main_result.expect("main call_tool timed out - client may be stuck in endless loop")?;
+        let parallel = parallel_result
+            .expect("parallel call_tool timed out - client may be stuck in endless loop")?;
+
+        assert_tool_success("parallel", &parallel?);
+        assert_tool_success("main", &result);
+
+        Ok(())
+    }
+}

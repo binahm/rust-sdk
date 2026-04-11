@@ -264,7 +264,14 @@ path = "tests/test_task.rs"
 
 [[test]]
 name = "test_streamable_http_priming"
-required-features = ["server", "client", "transport-streamable-http-server", "reqwest"]
+required-features = [
+  "server",
+  "client",
+  "transport-streamable-http-server",
+  "reqwest",
+  "transport-streamable-http-client",
+  "transport-streamable-http-client-reqwest"
+]
 path = "tests/test_streamable_http_priming.rs"
 
 [[test]]
