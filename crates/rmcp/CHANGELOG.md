@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0](https://github.com/modelcontextprotocol/rust-sdk/compare/rmcp-v1.4.0...rmcp-v1.5.0) - 2026-04-16
+
+### Added
+
+- *(transport)* add constructors for non_exhaustive error types ([#806](https://github.com/modelcontextprotocol/rust-sdk/pull/806))
+- add 2025-11-25 protocol version support ([#802](https://github.com/modelcontextprotocol/rust-sdk/pull/802))
+
+### Fixed
+
+- treat resource metadata JSON parse failure as soft error ([#810](https://github.com/modelcontextprotocol/rust-sdk/pull/810))
+- include http_request_id in request-wise priming event IDs ([#799](https://github.com/modelcontextprotocol/rust-sdk/pull/799))
+- *(http)* drain SSE stream for connection reuse ([#790](https://github.com/modelcontextprotocol/rust-sdk/pull/790))
+
+### Other
+
+- *(deps)* update which requirement from 7 to 8 ([#807](https://github.com/modelcontextprotocol/rust-sdk/pull/807))
+
+## [1.4.0](https://github.com/modelcontextprotocol/rust-sdk/compare/rmcp-v1.3.0...rmcp-v1.4.0) - 2026-04-09
+
+### Added
+
+- add Default and constructors to ServerSseMessage ([#794](https://github.com/modelcontextprotocol/rust-sdk/pull/794))
+- add meta to elicitation results ([#792](https://github.com/modelcontextprotocol/rust-sdk/pull/792))
+- *(macros)* auto-generate get_info and default router ([#785](https://github.com/modelcontextprotocol/rust-sdk/pull/785))
+- *(transport)* add which_command for cross-platform executable resolution ([#774](https://github.com/modelcontextprotocol/rust-sdk/pull/774))
+- *(auth)* add StoredCredentials::new() constructor ([#778](https://github.com/modelcontextprotocol/rust-sdk/pull/778))
+
+### Fixed
+
+- *(server)* remove initialized notification gate to support Streamable HTTP ([#788](https://github.com/modelcontextprotocol/rust-sdk/pull/788))
+- default session keep_alive to 5 minutes ([#780](https://github.com/modelcontextprotocol/rust-sdk/pull/780))
+- *(http)* add host check ([#764](https://github.com/modelcontextprotocol/rust-sdk/pull/764))
+- exclude local feature from docs.rs build ([#782](https://github.com/modelcontextprotocol/rust-sdk/pull/782))
+
+### Other
+
+- update Rust toolchain to 1.92 ([#797](https://github.com/modelcontextprotocol/rust-sdk/pull/797))
+- unify IntoCallToolResult Result impls ([#787](https://github.com/modelcontextprotocol/rust-sdk/pull/787))
+
 ## [1.3.0](https://github.com/modelcontextprotocol/rust-sdk/compare/rmcp-v1.2.0...rmcp-v1.3.0) - 2026-03-24
 
 ### Added
