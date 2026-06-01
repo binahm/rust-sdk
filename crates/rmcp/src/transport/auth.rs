@@ -613,6 +613,9 @@ pub struct AuthorizationManager {
     www_auth_scopes: RwLock<Vec<String>>,
     /// scopes_supported from protected resource metadata (RFC 9728)
     resource_scopes: RwLock<Vec<String>>,
+    /// Client secret currently configured (e.g. issued by dynamic client registration).
+    /// Lets callers persist a confidential DCR client across manager instances.
+    client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -707,6 +710,7 @@ impl AuthorizationManager {
             scope_upgrade_config: ScopeUpgradeConfig::default(),
             www_auth_scopes: RwLock::new(Vec::new()),
             resource_scopes: RwLock::new(Vec::new()),
+            client_secret: None,
         };
 
         Ok(manager)
@@ -817,6 +821,10 @@ impl AuthorizationManager {
             .set_token_uri(token_url)
             .set_redirect_uri(redirect_url);
 
+        // Remember the secret so callers can persist a confidential (e.g. DCR) client and
+        // reconfigure a fresh manager instance for the token-exchange step.
+        self.client_secret = config.client_secret.clone();
+
         if let Some(secret) = config.client_secret {
             client_builder = client_builder.set_client_secret(ClientSecret::new(secret));
         }
@@ -841,6 +849,17 @@ impl AuthorizationManager {
         self.oauth_client = Some(client_builder);
         Ok(())
     }
+
+    /// The client secret currently configured on this manager.
+    ///
+    /// When a confidential client is obtained via dynamic client registration, the issued
+    /// secret is only held inside the configured oauth2 client. This accessor lets callers
+    /// read it so they can persist it and reconfigure a new manager instance (e.g. for the
+    /// token-exchange step in a stateless HTTP handler). Returns `None` for public clients.
+    pub fn client_secret(&self) -> Option<&str> {
+        self.client_secret.as_deref()
+    }
+
     /// validate authorization server metadata before starting authorization.
     fn validate_server_metadata(&self, response_type: &str) -> Result<(), AuthError> {
         let Some(metadata) = self.metadata.as_ref() else {
@@ -2200,6 +2219,13 @@ impl AuthorizationSession {
         self.auth_manager.get_credentials().await
     }
 
+    /// The client secret configured for this session (e.g. issued by dynamic client
+    /// registration). Returns `None` for public clients. Persist this to reconfigure a
+    /// fresh manager for the token-exchange step in a stateless handler.
+    pub fn client_secret(&self) -> Option<&str> {
+        self.auth_manager.client_secret()
+    }
+
     /// get authorization url
     pub fn get_authorization_url(&self) -> &str {
         &self.auth_url
@@ -3117,6 +3143,23 @@ mod tests {
             scopes: vec![],
             redirect_uri: "http://localhost/callback".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_client_secret_is_exposed_after_configure_client() {
+        let mut manager = manager_with_metadata(None).await;
+        assert_eq!(manager.client_secret(), None);
+        manager.configure_client(test_client_config()).unwrap();
+        assert_eq!(manager.client_secret(), Some("my-secret"));
+    }
+
+    #[tokio::test]
+    async fn test_client_secret_is_none_for_public_client() {
+        let mut manager = manager_with_metadata(None).await;
+        let mut config = test_client_config();
+        config.client_secret = None;
+        manager.configure_client(config).unwrap();
+        assert_eq!(manager.client_secret(), None);
     }
 
     #[tokio::test]
