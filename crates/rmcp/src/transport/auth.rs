@@ -68,6 +68,15 @@ pub struct StoredCredentials {
     pub granted_scopes: Vec<String>,
     #[serde(default)]
     pub token_received_at: Option<u64>,
+    /// Client secret issued for a confidential client (e.g. by Dynamic Client Registration).
+    ///
+    /// Persisted alongside the client id so a reconstructed [`AuthorizationManager`] can
+    /// re-authenticate at the token endpoint for code exchange and refresh. Mirrors the
+    /// TypeScript SDK `OAuthClientProvider.saveClientInformation` / `clientInformation` pattern,
+    /// where the registered client's secret is stored and reloaded across stateless requests.
+    /// `None` for public clients, so behaviour is unchanged for them.
+    #[serde(default)]
+    pub client_secret: Option<String>,
 }
 
 impl std::fmt::Debug for StoredCredentials {
@@ -80,6 +89,10 @@ impl std::fmt::Debug for StoredCredentials {
             )
             .field("granted_scopes", &self.granted_scopes)
             .field("token_received_at", &self.token_received_at)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -97,7 +110,18 @@ impl StoredCredentials {
             token_response,
             granted_scopes,
             token_received_at,
+            client_secret: None,
         }
+    }
+
+    /// Attach a confidential-client secret (e.g. issued by Dynamic Client Registration).
+    ///
+    /// Lets a caller-provided [`CredentialStore`] persist the registered client's secret so a
+    /// fresh manager can re-authenticate at the token endpoint. Parallels the TypeScript SDK's
+    /// `saveClientInformation`.
+    pub fn with_client_secret(mut self, client_secret: Option<String>) -> Self {
+        self.client_secret = client_secret;
+        self
     }
 }
 
@@ -613,6 +637,9 @@ pub struct AuthorizationManager {
     www_auth_scopes: RwLock<Vec<String>>,
     /// scopes_supported from protected resource metadata (RFC 9728)
     resource_scopes: RwLock<Vec<String>>,
+    /// Client secret currently configured (e.g. issued by dynamic client registration).
+    /// Lets callers persist a confidential DCR client across manager instances.
+    client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -707,6 +734,7 @@ impl AuthorizationManager {
             scope_upgrade_config: ScopeUpgradeConfig::default(),
             www_auth_scopes: RwLock::new(Vec::new()),
             resource_scopes: RwLock::new(Vec::new()),
+            client_secret: None,
         };
 
         Ok(manager)
@@ -753,11 +781,53 @@ impl AuthorizationManager {
                     self.metadata = Some(metadata);
                 }
 
-                self.configure_client_id(&stored.client_id)?;
+                self.configure_client_from_stored(&stored)?;
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    /// Configure the oauth2 client from a confidential client's stored information.
+    ///
+    /// Loads the registered client (id + optional secret) from the credential store and, if
+    /// present, configures the oauth2 client so a freshly reconstructed manager can authenticate
+    /// at the token endpoint (code exchange and refresh) for confidential clients. Returns `true`
+    /// when a client was found and configured, `false` when the store is empty.
+    ///
+    /// This is the read side of the TypeScript SDK `OAuthClientProvider.clientInformation` pattern;
+    /// pair it with a [`CredentialStore`] that persists [`StoredCredentials::client_secret`].
+    pub async fn configure_from_stored_credentials(&mut self) -> Result<bool, AuthError> {
+        if let Some(stored) = self.credential_store.load().await? {
+            if self.metadata.is_none() {
+                let metadata = self.discover_metadata().await?;
+                self.metadata = Some(metadata);
+            }
+            self.configure_client_from_stored(&stored)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Configure the oauth2 client from stored credentials, preserving a confidential secret.
+    ///
+    /// Public clients (no stored secret) keep the id-only configuration. Confidential clients
+    /// (e.g. issued by Dynamic Client Registration) are reconfigured with their secret so token
+    /// exchange/refresh can authenticate; `configure_client` then selects the token-endpoint auth
+    /// method (basic/post) from the discovered metadata.
+    fn configure_client_from_stored(
+        &mut self,
+        stored: &StoredCredentials,
+    ) -> Result<(), AuthError> {
+        match &stored.client_secret {
+            Some(secret) => {
+                let config =
+                    OAuthClientConfig::new(stored.client_id.clone(), self.base_url.to_string())
+                        .with_client_secret(secret.clone());
+                self.configure_client(config)
+            }
+            None => self.configure_client_id(&stored.client_id),
+        }
     }
 
     pub fn with_client(&mut self, http_client: HttpClient) -> Result<(), AuthError> {
@@ -817,6 +887,10 @@ impl AuthorizationManager {
             .set_token_uri(token_url)
             .set_redirect_uri(redirect_url);
 
+        // Remember the secret so callers can persist a confidential (e.g. DCR) client and
+        // reconfigure a fresh manager instance for the token-exchange step.
+        self.client_secret = config.client_secret.clone();
+
         if let Some(secret) = config.client_secret {
             client_builder = client_builder.set_client_secret(ClientSecret::new(secret));
         }
@@ -841,6 +915,17 @@ impl AuthorizationManager {
         self.oauth_client = Some(client_builder);
         Ok(())
     }
+
+    /// The client secret currently configured on this manager.
+    ///
+    /// When a confidential client is obtained via dynamic client registration, the issued
+    /// secret is only held inside the configured oauth2 client. This accessor lets callers
+    /// read it so they can persist it and reconfigure a new manager instance (e.g. for the
+    /// token-exchange step in a stateless HTTP handler). Returns `None` for public clients.
+    pub fn client_secret(&self) -> Option<&str> {
+        self.client_secret.as_deref()
+    }
+
     /// validate authorization server metadata before starting authorization.
     fn validate_server_metadata(&self, response_type: &str) -> Result<(), AuthError> {
         let Some(metadata) = self.metadata.as_ref() else {
@@ -1213,6 +1298,10 @@ impl AuthorizationManager {
             token_response: Some(token_result.clone()),
             granted_scopes,
             token_received_at: Some(Self::now_epoch_secs()),
+            // Persist the confidential-client secret alongside the token so a reconstructed
+            // manager can re-authenticate at the token endpoint for refresh (TS-SDK
+            // saveClientInformation parallel). `None` for public clients.
+            client_secret: self.client_secret.clone(),
         };
         self.credential_store.save(stored).await?;
 
@@ -1324,6 +1413,9 @@ impl AuthorizationManager {
             token_response: Some(token_result.clone()),
             granted_scopes,
             token_received_at: Some(Self::now_epoch_secs()),
+            // Preserve the confidential-client secret across refresh-writes so future refreshes
+            // keep authenticating (TS-SDK saveClientInformation parallel). `None` for public clients.
+            client_secret: self.client_secret.clone(),
         };
         self.credential_store.save(stored).await?;
 
@@ -1939,6 +2031,7 @@ impl AuthorizationManager {
             token_response: Some(token_result.clone()),
             granted_scopes,
             token_received_at: Some(Self::now_epoch_secs()),
+            client_secret: self.client_secret.clone(),
         };
         self.credential_store.save(stored).await?;
 
@@ -2061,6 +2154,7 @@ impl AuthorizationManager {
             token_response: Some(token_result.clone()),
             granted_scopes,
             token_received_at: Some(Self::now_epoch_secs()),
+            client_secret: self.client_secret.clone(),
         };
         self.credential_store.save(stored).await?;
 
@@ -2200,6 +2294,13 @@ impl AuthorizationSession {
         self.auth_manager.get_credentials().await
     }
 
+    /// The client secret configured for this session (e.g. issued by dynamic client
+    /// registration). Returns `None` for public clients. Persist this to reconfigure a
+    /// fresh manager for the token-exchange step in a stateless handler.
+    pub fn client_secret(&self) -> Option<&str> {
+        self.auth_manager.client_secret()
+    }
+
     /// get authorization url
     pub fn get_authorization_url(&self) -> &str {
         &self.auth_url
@@ -2322,6 +2423,7 @@ impl OAuthState {
                 token_response: Some(credentials),
                 granted_scopes,
                 token_received_at: Some(AuthorizationManager::now_epoch_secs()),
+                client_secret: manager.client_secret.clone(),
             };
             manager.credential_store.save(stored).await?;
 
@@ -2570,8 +2672,9 @@ mod tests {
     use url::Url;
 
     use super::{
-        AuthError, AuthorizationManager, AuthorizationMetadata, InMemoryStateStore,
-        OAuthClientConfig, ScopeUpgradeConfig, StateStore, StoredAuthorizationState, is_https_url,
+        AuthError, AuthorizationManager, AuthorizationMetadata, CredentialStore,
+        InMemoryCredentialStore, InMemoryStateStore, OAuthClientConfig, ScopeUpgradeConfig,
+        StateStore, StoredAuthorizationState, is_https_url,
     };
     use crate::transport::auth::VendorExtraTokenFields;
 
@@ -2925,6 +3028,7 @@ mod tests {
             token_response: Some(token_response),
             granted_scopes: vec![],
             token_received_at: None,
+            client_secret: None,
         };
         let debug_output = format!("{:?}", creds);
 
@@ -3117,6 +3221,112 @@ mod tests {
             scopes: vec![],
             redirect_uri: "http://localhost/callback".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_client_secret_is_exposed_after_configure_client() {
+        let mut manager = manager_with_metadata(None).await;
+        assert_eq!(manager.client_secret(), None);
+        manager.configure_client(test_client_config()).unwrap();
+        assert_eq!(manager.client_secret(), Some("my-secret"));
+    }
+
+    #[tokio::test]
+    async fn test_client_secret_is_none_for_public_client() {
+        let mut manager = manager_with_metadata(None).await;
+        let mut config = test_client_config();
+        config.client_secret = None;
+        manager.configure_client(config).unwrap();
+        assert_eq!(manager.client_secret(), None);
+    }
+
+    #[test]
+    fn test_stored_credentials_client_secret_serde_default() {
+        // Older persisted records (and public clients) have no client_secret field;
+        // #[serde(default)] must deserialize them to None rather than erroring.
+        let json = r#"{"client_id":"c","token_response":null,"granted_scopes":[]}"#;
+        let creds: StoredCredentials = serde_json::from_str(json).unwrap();
+        assert_eq!(creds.client_secret, None);
+
+        // Round-trip with a secret present.
+        let with_secret = StoredCredentials::new("c".to_string(), None, vec![], None)
+            .with_client_secret(Some("shh".to_string()));
+        let round: StoredCredentials =
+            serde_json::from_str(&serde_json::to_string(&with_secret).unwrap()).unwrap();
+        assert_eq!(round.client_secret.as_deref(), Some("shh"));
+    }
+
+    #[test]
+    fn test_stored_credentials_debug_redacts_client_secret() {
+        let creds = StoredCredentials::new("c".to_string(), None, vec![], None)
+            .with_client_secret(Some("super-secret".to_string()));
+        let dbg = format!("{creds:?}");
+        assert!(!dbg.contains("super-secret"), "secret leaked: {dbg}");
+        assert!(dbg.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn test_configure_from_stored_credentials_confidential_client() {
+        // A confidential client (stored secret) must be reconfigured with its secret so a
+        // reconstructed manager can authenticate at the token endpoint (TS-SDK clientInformation).
+        let mut manager = manager_with_metadata(None).await;
+        let stored = StoredCredentials::new(
+            "dcr-client".to_string(),
+            Some(make_token_response("tok", Some(3600))),
+            vec![],
+            Some(AuthorizationManager::now_epoch_secs()),
+        )
+        .with_client_secret(Some("dcr-secret".to_string()));
+        let store = InMemoryCredentialStore::new();
+        store.save(stored).await.unwrap();
+        manager.set_credential_store(store);
+
+        assert!(manager.configure_from_stored_credentials().await.unwrap());
+        assert_eq!(manager.client_secret(), Some("dcr-secret"));
+    }
+
+    #[tokio::test]
+    async fn test_configure_from_stored_credentials_public_client_is_id_only() {
+        let mut manager = manager_with_metadata(None).await;
+        let stored = StoredCredentials::new(
+            "public-client".to_string(),
+            Some(make_token_response("tok", Some(3600))),
+            vec![],
+            Some(AuthorizationManager::now_epoch_secs()),
+        );
+        let store = InMemoryCredentialStore::new();
+        store.save(stored).await.unwrap();
+        manager.set_credential_store(store);
+
+        assert!(manager.configure_from_stored_credentials().await.unwrap());
+        assert_eq!(manager.client_secret(), None);
+    }
+
+    #[tokio::test]
+    async fn test_configure_from_stored_credentials_empty_store() {
+        let mut manager = manager_with_metadata(None).await;
+        // Default in-memory store is empty.
+        assert!(!manager.configure_from_stored_credentials().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_from_store_restores_confidential_secret() {
+        // initialize_from_store is the path the gateway's backend-connect uses; it must restore
+        // the secret so confidential-client token refresh authenticates.
+        let mut manager = manager_with_metadata(None).await;
+        let stored = StoredCredentials::new(
+            "dcr-client".to_string(),
+            Some(make_token_response("tok", Some(3600))),
+            vec![],
+            Some(AuthorizationManager::now_epoch_secs()),
+        )
+        .with_client_secret(Some("dcr-secret".to_string()));
+        let store = InMemoryCredentialStore::new();
+        store.save(stored).await.unwrap();
+        manager.set_credential_store(store);
+
+        assert!(manager.initialize_from_store().await.unwrap());
+        assert_eq!(manager.client_secret(), Some("dcr-secret"));
     }
 
     #[tokio::test]
@@ -3586,6 +3796,7 @@ mod tests {
             token_response: Some(make_token_response("my-access-token", Some(3600))),
             granted_scopes: vec![],
             token_received_at: Some(AuthorizationManager::now_epoch_secs()),
+            client_secret: None,
         };
         manager.credential_store.save(stored).await.unwrap();
 
@@ -3603,6 +3814,7 @@ mod tests {
             token_response: Some(make_token_response("stale-token", Some(3600))),
             granted_scopes: vec![],
             token_received_at: Some(AuthorizationManager::now_epoch_secs() - 7200),
+            client_secret: None,
         };
         manager.credential_store.save(stored).await.unwrap();
 
@@ -3621,6 +3833,7 @@ mod tests {
             token_response: Some(make_token_response("no-expiry-token", None)),
             granted_scopes: vec![],
             token_received_at: None,
+            client_secret: None,
         };
         manager.credential_store.save(stored).await.unwrap();
 
@@ -3638,6 +3851,7 @@ mod tests {
             token_response: Some(make_token_response("almost-expired", Some(3600))),
             granted_scopes: vec![],
             token_received_at: Some(AuthorizationManager::now_epoch_secs() - 3590),
+            client_secret: None,
         };
         manager.credential_store.save(stored).await.unwrap();
 
@@ -3656,6 +3870,7 @@ mod tests {
             token_response: Some(make_token_response("stale-token", Some(3600))),
             granted_scopes: vec![],
             token_received_at: Some(AuthorizationManager::now_epoch_secs() - 7200),
+            client_secret: None,
         };
         manager.credential_store.save(stored).await.unwrap();
 
@@ -3912,6 +4127,7 @@ mod tests {
             token_response: None,
             granted_scopes: vec![],
             token_received_at: None,
+            client_secret: None,
         };
         manager.credential_store.save(stored).await.unwrap();
 
@@ -3932,6 +4148,7 @@ mod tests {
             token_response: Some(make_token_response("old-token", Some(3600))),
             granted_scopes: vec![],
             token_received_at: Some(AuthorizationManager::now_epoch_secs()),
+            client_secret: None,
         };
         manager.credential_store.save(stored).await.unwrap();
 
@@ -3992,6 +4209,7 @@ mod tests {
             )),
             granted_scopes: vec!["read".to_string(), "write".to_string()],
             token_received_at: Some(AuthorizationManager::now_epoch_secs()),
+            client_secret: None,
         };
         manager.credential_store.save(stored).await.unwrap();
 
@@ -4029,6 +4247,7 @@ mod tests {
             )),
             granted_scopes: vec![],
             token_received_at: Some(AuthorizationManager::now_epoch_secs()),
+            client_secret: None,
         };
         manager.credential_store.save(stored).await.unwrap();
 
